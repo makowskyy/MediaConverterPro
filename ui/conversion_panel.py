@@ -1,17 +1,20 @@
 import os
+import time
 
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QComboBox, QLineEdit, QSlider, QGroupBox, QCheckBox,
-    QFileDialog, QSizePolicy,
+    QFileDialog, QSizePolicy, QProgressBar, QMessageBox,
 )
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtGui import QPixmap
 
 from config.codecs import VIDEO_FORMATS, AUDIO_FORMATS, PRESET_CODECS
 from config.presets import PRESETS, VIDEO_BITRATES, AUDIO_BITRATES, RESOLUTIONS, FPS_OPTIONS
 from core.ffprobe import get_metadata, get_thumbnail
-from config.settings import DEFAULT_OUTPUT_DIR, FFMPEG_PATH
+from core.ffmpeg_wrapper import FFmpegWrapper
+from core.ffmpeg_worker import FFmpegWorker
+from config.settings import DEFAULT_OUTPUT_DIR, FFMPEG_PATH, FFPROBE_PATH
 
 VIDEO_EXTS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.ts',
               '.m4v', '.wmv', '.mpeg', '.mpg'}
@@ -21,11 +24,36 @@ ALL_EXTS   = VIDEO_EXTS | AUDIO_EXTS
 THUMB_DIR = os.path.join(os.path.dirname(__file__), '..', 'assets', 'thumbnails')
 
 
+# ── Wątek wczytywania metadanych i miniaturki ────────────────────────────────
+
+class _FileLoaderWorker(QThread):
+    metadata_ready  = Signal(dict)
+    thumbnail_ready = Signal(str)   # ścieżka do pliku miniaturki
+
+    def __init__(self, path: str, thumb_path: str, parent=None):
+        super().__init__(parent)
+        self._path       = path
+        self._thumb_path = thumb_path
+
+    def run(self):
+        meta = get_metadata(self._path)
+        if meta:
+            self.metadata_ready.emit(meta)
+        if get_thumbnail(self._path, self._thumb_path, FFMPEG_PATH):
+            self.thumbnail_ready.emit(self._thumb_path)
+
+
+# ── Główny panel konwersji ───────────────────────────────────────────────────
+
 class ConversionPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._input_file: str | None = None
-        self._output_ext: str = 'mp4'
+        self._input_file:   str | None            = None
+        self._output_ext:   str                   = 'mp4'
+        self._worker:       FFmpegWorker | None   = None
+        self._file_loader:  _FileLoaderWorker | None = None
+        self._conv_start:   float                 = 0.0
+        self._last_output:  str | None            = None
         self.setAcceptDrops(True)
         self._setup_ui()
 
@@ -50,42 +78,33 @@ class ConversionPanel(QWidget):
         h.setSpacing(16)
         h.setContentsMargins(12, 12, 12, 12)
 
-        # Miniaturka
         self._thumb_label = QLabel('Brak\npodglądu')
         self._thumb_label.setObjectName('thumbnailLabel')
         self._thumb_label.setFixedSize(160, 100)
         self._thumb_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         h.addWidget(self._thumb_label)
 
-        # Metadane
         meta_col = QVBoxLayout()
         meta_col.setSpacing(4)
         meta_col.setContentsMargins(0, 0, 0, 0)
 
-        self._meta_name = QLabel('—')
+        self._meta_name   = QLabel('—')
         self._meta_name.setObjectName('fileInfoLabel')
-        meta_col.addWidget(self._meta_name)
-
         self._meta_format = QLabel('Format: —')
         self._meta_format.setObjectName('fileMetaLabel')
-        meta_col.addWidget(self._meta_format)
-
-        self._meta_res = QLabel('Rozdzielczość: —')
+        self._meta_res    = QLabel('Rozdzielczość: —')
         self._meta_res.setObjectName('fileMetaLabel')
-        meta_col.addWidget(self._meta_res)
-
-        self._meta_dur = QLabel('Czas trwania: —')
+        self._meta_dur    = QLabel('Czas trwania: —')
         self._meta_dur.setObjectName('fileMetaLabel')
-        meta_col.addWidget(self._meta_dur)
-
-        self._meta_size = QLabel('Rozmiar: —')
+        self._meta_size   = QLabel('Rozmiar: —')
         self._meta_size.setObjectName('fileMetaLabel')
-        meta_col.addWidget(self._meta_size)
 
+        for w in (self._meta_name, self._meta_format,
+                  self._meta_res, self._meta_dur, self._meta_size):
+            meta_col.addWidget(w)
         meta_col.addStretch()
         h.addLayout(meta_col, stretch=1)
 
-        # Przyciski
         btn_col = QVBoxLayout()
         btn_col.setSpacing(6)
         btn_col.setAlignment(Qt.AlignmentFlag.AlignTop)
@@ -128,7 +147,6 @@ class ConversionPanel(QWidget):
         self._combo_format.currentTextChanged.connect(self._on_format_changed)
         row1.addLayout(self._ccol('Format wyjściowy', self._combo_format))
 
-        # Kolumna kodeku wideo — wrapper do show/hide
         self._vcodec_col = QWidget()
         self._vcodec_col.setStyleSheet('background: transparent;')
         vcc = QVBoxLayout(self._vcodec_col)
@@ -145,10 +163,9 @@ class ConversionPanel(QWidget):
 
         self._combo_acodec = QComboBox()
         row1.addLayout(self._ccol('Kodek audio', self._combo_acodec))
-
         lay.addLayout(row1)
 
-        # Wiersz 2: jakość | rozdzielczość | fps | bitrate wideo (ukryty w trybie audio)
+        # Wiersz 2: jakość | rozdzielczość | fps | bitrate wideo
         self._row2 = QWidget()
         self._row2.setStyleSheet('background: transparent;')
         row2_h = QHBoxLayout(self._row2)
@@ -158,7 +175,7 @@ class ConversionPanel(QWidget):
         self._combo_preset = QComboBox()
         for label, _ in PRESETS:
             self._combo_preset.addItem(label)
-        self._combo_preset.setCurrentIndex(1)  # Wysoka
+        self._combo_preset.setCurrentIndex(1)
         row2_h.addLayout(self._ccol('Jakość', self._combo_preset))
 
         self._combo_res = QComboBox()
@@ -175,7 +192,6 @@ class ConversionPanel(QWidget):
         for br in VIDEO_BITRATES:
             self._combo_vbitrate.addItem('auto' if br == 'auto' else f'{br} kbps')
         row2_h.addLayout(self._ccol('Bitrate wideo', self._combo_vbitrate))
-
         lay.addWidget(self._row2)
 
         # Wiersz 3: bitrate audio | głośność | checkboxy
@@ -188,13 +204,13 @@ class ConversionPanel(QWidget):
         abitrate_w = QWidget()
         abitrate_w.setStyleSheet('background: transparent;')
         abitrate_w.setFixedWidth(170)
-        QVBoxLayout(abitrate_w).setContentsMargins(0, 0, 0, 0)
-        abitrate_w.layout().setSpacing(4)
-        abitrate_w.layout().addWidget(self._field_label('Bitrate audio'))
-        abitrate_w.layout().addWidget(self._combo_abitrate)
+        al = QVBoxLayout(abitrate_w)
+        al.setContentsMargins(0, 0, 0, 0)
+        al.setSpacing(4)
+        al.addWidget(self._flabel('Bitrate audio'))
+        al.addWidget(self._combo_abitrate)
         row3.addWidget(abitrate_w)
 
-        # Głośność
         vol_w = QWidget()
         vol_w.setStyleSheet('background: transparent;')
         vol_lay = QVBoxLayout(vol_w)
@@ -211,7 +227,6 @@ class ConversionPanel(QWidget):
         vol_lay.addWidget(self._slider_vol)
         row3.addWidget(vol_w, stretch=1)
 
-        # Checkboxy + Edytuj
         chk_w = QWidget()
         chk_w.setStyleSheet('background: transparent;')
         chk_lay = QVBoxLayout(chk_w)
@@ -234,13 +249,10 @@ class ConversionPanel(QWidget):
         trim_row.addWidget(self._chk_trim)
         trim_row.addWidget(self._btn_edit)
         chk_lay.addLayout(trim_row)
-
         row3.addWidget(chk_w)
         lay.addLayout(row3)
 
-        # Wypełnij kodeki dla domyślnego formatu
         self._on_format_changed(self._combo_format.currentText())
-
         return box
 
     # ── 3. Zapisz plik w ────────────────────────────────────────────────────
@@ -251,9 +263,7 @@ class ConversionPanel(QWidget):
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(6)
 
-        lbl = QLabel('Zapisz plik w')
-        lbl.setObjectName('fieldLabel')
-        lay.addWidget(lbl)
+        lay.addWidget(self._flabel('Zapisz plik w'))
 
         path_row = QHBoxLayout()
         path_row.setSpacing(8)
@@ -266,28 +276,54 @@ class ConversionPanel(QWidget):
         path_row.addWidget(self._edit_outpath, stretch=1)
         path_row.addWidget(btn_browse)
         lay.addLayout(path_row)
-
         return w
 
-    # ── 4. Pasek akcji ───────────────────────────────────────────────────────
+    # ── 4. Pasek postępu + akcji ────────────────────────────────────────────
 
-    def _build_action_bar(self) -> QHBoxLayout:
-        bar = QHBoxLayout()
-        bar.setContentsMargins(0, 4, 0, 0)
+    def _build_action_bar(self) -> QVBoxLayout:
+        outer = QVBoxLayout()
+        outer.setContentsMargins(0, 4, 0, 0)
+        outer.setSpacing(8)
 
+        # Progress row (ukryty do czasu konwersji)
+        prog_row = QHBoxLayout()
+        prog_row.setSpacing(10)
+        self._progress_bar = QProgressBar()
+        self._progress_bar.setRange(0, 100)
+        self._progress_bar.setValue(0)
+        self._progress_bar.setTextVisible(False)
+        self._progress_bar.setVisible(False)
+        self._lbl_eta = QLabel('')
+        self._lbl_eta.setObjectName('fieldLabel')
+        self._lbl_eta.setFixedWidth(72)
+        self._lbl_eta.setVisible(False)
+        prog_row.addWidget(self._progress_bar, stretch=1)
+        prog_row.addWidget(self._lbl_eta)
+        outer.addLayout(prog_row)
+
+        # Przycisk + status row
+        btn_row = QHBoxLayout()
         self._lbl_status = QLabel('Brak załadowanego pliku')
         self._lbl_status.setObjectName('fieldLabel')
-        bar.addWidget(self._lbl_status)
+        btn_row.addWidget(self._lbl_status)
+        btn_row.addStretch()
 
-        bar.addStretch()
+        self._btn_cancel = QPushButton('Anuluj')
+        self._btn_cancel.setObjectName('btnCancel')
+        self._btn_cancel.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._btn_cancel.setVisible(False)
+        self._btn_cancel.clicked.connect(self._cancel_conversion)
+        btn_row.addWidget(self._btn_cancel)
 
         self._btn_convert = QPushButton('Rozpocznij konwersję')
         self._btn_convert.setObjectName('btnPrimary')
         self._btn_convert.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_convert.setEnabled(False)
-        bar.addWidget(self._btn_convert)
+        self._btn_convert.clicked.connect(self._start_conversion)
+        btn_row.addWidget(self._btn_convert)
 
-        return bar
+        outer.addLayout(btn_row)
+        return outer
 
     # ── Helpers UI ───────────────────────────────────────────────────────────
 
@@ -302,12 +338,75 @@ class ConversionPanel(QWidget):
         return col
 
     @staticmethod
-    def _field_label(text: str) -> QLabel:
+    def _flabel(text: str) -> QLabel:
         lbl = QLabel(text)
         lbl.setObjectName('fieldLabel')
         return lbl
 
-    # ── Logic ────────────────────────────────────────────────────────────────
+    # ── Logika — plik ────────────────────────────────────────────────────────
+
+    def _open_file_dialog(self):
+        exts = ' '.join(f'*{e}' for e in sorted(ALL_EXTS))
+        path, _ = QFileDialog.getOpenFileName(
+            self, 'Wybierz plik multimedialny',
+            os.path.expanduser('~'),
+            f'Pliki multimedialne ({exts});;Wszystkie pliki (*)',
+        )
+        if path:
+            self._load_file(path)
+
+    def _load_file(self, path: str):
+        # Zatrzymaj poprzedni loader jeśli działa
+        if self._file_loader and self._file_loader.isRunning():
+            self._file_loader.quit()
+            self._file_loader.wait(500)
+
+        self._input_file = path
+        self._meta_name.setText(os.path.basename(path))
+        self._thumb_label.clear()
+        self._thumb_label.setText('Ładowanie…')
+
+        os.makedirs(THUMB_DIR, exist_ok=True)
+        thumb_path = os.path.join(THUMB_DIR, 'preview.jpg')
+
+        self._file_loader = _FileLoaderWorker(path, thumb_path)
+        self._file_loader.metadata_ready.connect(self._update_file_info)
+        self._file_loader.thumbnail_ready.connect(self._on_thumbnail_ready)
+        self._file_loader.start()
+
+        self._set_status('Gotowy do konwersji', 'statusLabel')
+        self._btn_convert.setEnabled(True)
+        self._refresh_output_ext()
+
+    def _update_file_info(self, meta: dict):
+        self._meta_name.setText(meta.get('filename', '—'))
+        self._meta_format.setText(f'Format: {meta.get("format", "—")}')
+
+        w_px, h_px = meta.get('width'), meta.get('height')
+        self._meta_res.setText(
+            f'Rozdzielczość: {w_px}×{h_px}' if w_px and h_px else 'Rozdzielczość: —')
+
+        dur = meta.get('duration', 0)
+        if dur:
+            total = int(float(dur))
+            hh, rem = divmod(total, 3600)
+            mm, ss  = divmod(rem, 60)
+            self._meta_dur.setText(f'Czas trwania: {hh:02d}:{mm:02d}:{ss:02d}')
+
+        size = meta.get('size', 0)
+        if size:
+            self._meta_size.setText(f'Rozmiar: {int(size) / (1024*1024):.2f} MB')
+
+    def _on_thumbnail_ready(self, thumb_path: str):
+        pm = QPixmap(thumb_path).scaled(
+            160, 100,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._thumb_label.setPixmap(pm)
+        self._thumb_label.setText('')
+
+    # ── Logika — format / kodek ──────────────────────────────────────────────
 
     def _on_type_changed(self, text: str):
         is_video = (text == 'Wideo')
@@ -337,63 +436,6 @@ class ConversionPanel(QWidget):
         self._combo_vcodec.blockSignals(False)
         self._refresh_output_ext()
 
-    def _open_file_dialog(self):
-        exts = ' '.join(f'*{e}' for e in sorted(ALL_EXTS))
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            'Wybierz plik multimedialny',
-            os.path.expanduser('~'),
-            f'Pliki multimedialne ({exts});;Wszystkie pliki (*)',
-        )
-        if path:
-            self._load_file(path)
-
-    def _load_file(self, path: str):
-        self._input_file = path
-
-        meta = get_metadata(path)
-        if meta:
-            self._update_file_info(meta)
-        else:
-            self._meta_name.setText(os.path.basename(path))
-
-        os.makedirs(THUMB_DIR, exist_ok=True)
-        thumb_path = os.path.join(THUMB_DIR, 'preview.jpg')
-        if get_thumbnail(path, thumb_path, FFMPEG_PATH):
-            pm = QPixmap(thumb_path).scaled(
-                160, 100,
-                Qt.AspectRatioMode.KeepAspectRatio,
-                Qt.TransformationMode.SmoothTransformation,
-            )
-            self._thumb_label.setPixmap(pm)
-            self._thumb_label.setText('')
-        else:
-            self._thumb_label.clear()
-            self._thumb_label.setText('Brak\npodglądu')
-
-        self._set_status('Gotowy do konwersji', 'statusLabel')
-        self._btn_convert.setEnabled(True)
-        self._refresh_output_ext()
-
-    def _update_file_info(self, meta: dict):
-        self._meta_name.setText(meta.get('filename', '—'))
-        self._meta_format.setText(f'Format: {meta.get("format", "—")}')
-
-        w_px, h_px = meta.get('width'), meta.get('height')
-        self._meta_res.setText(
-            f'Rozdzielczość: {w_px}×{h_px}' if w_px and h_px else 'Rozdzielczość: —')
-
-        dur = meta.get('duration', 0)
-        if dur:
-            total = int(float(dur))
-            hh, rem = divmod(total, 3600)
-            mm, ss  = divmod(rem, 60)
-            self._meta_dur.setText(f'Czas trwania: {hh:02d}:{mm:02d}:{ss:02d}')
-
-        size = meta.get('size', 0)
-        if size:
-            self._meta_size.setText(f'Rozmiar: {int(size) / (1024 * 1024):.2f} MB')
-
     def _browse_output_dir(self):
         folder = QFileDialog.getExistingDirectory(
             self, 'Wybierz katalog wyjściowy',
@@ -409,6 +451,82 @@ class ConversionPanel(QWidget):
             self._output_ext = VIDEO_FORMATS[fmt]['extension']
         elif not is_video and fmt in AUDIO_FORMATS:
             self._output_ext = AUDIO_FORMATS[fmt]['extension']
+
+    # ── Logika — konwersja ───────────────────────────────────────────────────
+
+    def _start_conversion(self):
+        input_file  = self._input_file
+        output_file = self.get_output_file()
+
+        if not input_file or not output_file:
+            return
+
+        wrapper = FFmpegWrapper(FFMPEG_PATH, FFPROBE_PATH)
+        if not wrapper.check_available():
+            QMessageBox.critical(self, 'Błąd',
+                'Nie znaleziono FFmpeg w systemie.\n'
+                'Upewnij się, że ffmpeg.exe jest w PATH.')
+            return
+
+        os.makedirs(os.path.dirname(output_file), exist_ok=True)
+
+        command = wrapper.build_command(input_file, output_file, self.get_settings())
+        self._last_output = output_file
+
+        self._worker = FFmpegWorker(input_file, output_file, command, FFPROBE_PATH)
+        self._worker.progress_updated.connect(self._on_progress)
+        self._worker.status_changed.connect(self._on_worker_status)
+        self._worker.finished.connect(self._on_finished)
+
+        self._conv_start = time.monotonic()
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(True)
+        self._lbl_eta.setText('ETA: —')
+        self._lbl_eta.setVisible(True)
+        self._btn_convert.setEnabled(False)
+        self._btn_cancel.setVisible(True)
+        self._set_status('Konwertowanie…', 'statusLabelBusy')
+
+        self._worker.start()
+
+    def _cancel_conversion(self):
+        if self._worker and self._worker.isRunning():
+            self._worker.cancel()
+            self._worker.wait(3000)
+        self._reset_conversion_ui()
+        self._set_status('Anulowano', 'fieldLabel')
+
+    def _on_progress(self, pct: int):
+        self._progress_bar.setValue(pct)
+        if pct > 0:
+            elapsed   = time.monotonic() - self._conv_start
+            remaining = elapsed / pct * (100 - pct)
+            mm, ss    = divmod(int(remaining), 60)
+            self._lbl_eta.setText(f'ETA: {mm:02d}:{ss:02d}')
+
+    def _on_worker_status(self, msg: str):
+        pass  # status ustawiamy przez _on_finished
+
+    def _on_finished(self, success: bool):
+        self._reset_conversion_ui()
+        if success:
+            self._set_status('Zakończono pomyślnie', 'statusLabel')
+            QMessageBox.information(
+                self, 'Konwersja zakończona',
+                f'Plik zapisano jako:\n{self._last_output}')
+        else:
+            self._set_status('Błąd konwersji', 'statusLabelError')
+            QMessageBox.critical(
+                self, 'Błąd konwersji',
+                'Wystąpił błąd podczas konwersji.\n'
+                'Sprawdź parametry i spróbuj ponownie.')
+
+    def _reset_conversion_ui(self):
+        self._progress_bar.setValue(0)
+        self._progress_bar.setVisible(False)
+        self._lbl_eta.setVisible(False)
+        self._btn_cancel.setVisible(False)
+        self._btn_convert.setEnabled(True)
 
     def _set_status(self, text: str, obj_name: str = 'fieldLabel'):
         self._lbl_status.setText(text)
@@ -434,7 +552,7 @@ class ConversionPanel(QWidget):
                 self._load_file(path)
                 event.acceptProposedAction()
 
-    # ── Public API (Etap 4) ──────────────────────────────────────────────────
+    # ── Public API ───────────────────────────────────────────────────────────
 
     def get_input_file(self) -> str | None:
         return self._input_file
@@ -478,11 +596,3 @@ class ConversionPanel(QWidget):
             'volume':        self._slider_vol.value(),
             'keep_audio':    self._chk_keep_audio.isChecked(),
         }
-
-    @property
-    def btn_convert(self) -> QPushButton:
-        return self._btn_convert
-
-    @property
-    def lbl_status(self) -> QLabel:
-        return self._lbl_status
