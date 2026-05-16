@@ -14,6 +14,7 @@ from config.presets import PRESETS, VIDEO_BITRATES, AUDIO_BITRATES, RESOLUTIONS,
 from core.ffprobe import get_metadata, get_thumbnail
 from core.ffmpeg_wrapper import FFmpegWrapper
 from core.ffmpeg_worker import FFmpegWorker
+from ui.editor_dialog import TrimDialog
 from config.settings import DEFAULT_OUTPUT_DIR, FFMPEG_PATH, FFPROBE_PATH
 
 VIDEO_EXTS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.ts',
@@ -54,6 +55,10 @@ class ConversionPanel(QWidget):
         self._file_loader:  _FileLoaderWorker | None = None
         self._conv_start:   float                 = 0.0
         self._last_output:  str | None            = None
+        self._duration:     float                 = 0.0
+        self._trim_start:   str                   = ''
+        self._trim_end:     str                   = ''
+        self._trim_copy:    bool                  = True
         self.setAcceptDrops(True)
         self._setup_ui()
 
@@ -240,12 +245,13 @@ class ConversionPanel(QWidget):
         trim_row = QHBoxLayout()
         trim_row.setSpacing(8)
         self._chk_trim = QCheckBox('Przytnij do zaznaczonego fragmentu')
-        self._btn_edit = QPushButton('✂  Edytuj')
+        self._btn_edit = QPushButton('Edytuj')
         self._btn_edit.setObjectName('btnOutline')
         self._btn_edit.setFixedWidth(90)
         self._btn_edit.setCursor(Qt.CursorShape.PointingHandCursor)
         self._btn_edit.setEnabled(False)
         self._chk_trim.toggled.connect(self._btn_edit.setEnabled)
+        self._btn_edit.clicked.connect(self._open_trim_dialog)
         trim_row.addWidget(self._chk_trim)
         trim_row.addWidget(self._btn_edit)
         chk_lay.addLayout(trim_row)
@@ -379,6 +385,9 @@ class ConversionPanel(QWidget):
         self._refresh_output_ext()
 
     def _update_file_info(self, meta: dict):
+        self._duration = float(meta.get('duration') or 0.0)
+        self._trim_start = ''
+        self._trim_end   = ''
         self._meta_name.setText(meta.get('filename', '—'))
         self._meta_format.setText(f'Format: {meta.get("format", "—")}')
 
@@ -405,6 +414,20 @@ class ConversionPanel(QWidget):
         )
         self._thumb_label.setPixmap(pm)
         self._thumb_label.setText('')
+
+    def _open_trim_dialog(self):
+        if not self._input_file or self._duration <= 0:
+            return
+        dlg = TrimDialog(
+            self._duration,
+            start=self._trim_start,
+            end=self._trim_end,
+            parent=self,
+        )
+        if dlg.exec():
+            self._trim_start = dlg.get_trim_start()
+            self._trim_end   = dlg.get_trim_end()
+            self._trim_copy  = dlg.get_copy_streams()
 
     # ── Logika — format / kodek ──────────────────────────────────────────────
 
@@ -585,6 +608,8 @@ class ConversionPanel(QWidget):
             if 0 <= pi < len(PRESETS):
                 preset = PRESETS[pi][1]
 
+        use_trim = self._chk_trim.isChecked() and bool(self._trim_start or self._trim_end)
+
         return {
             'video_codec':   vcodec,
             'audio_codec':   acodec,
@@ -595,4 +620,7 @@ class ConversionPanel(QWidget):
             'audio_bitrate': AUDIO_BITRATES[self._combo_abitrate.currentIndex()],
             'volume':        self._slider_vol.value(),
             'keep_audio':    self._chk_keep_audio.isChecked(),
+            'trim_start':    self._trim_start if use_trim else '',
+            'trim_end':      self._trim_end   if use_trim else '',
+            'trim_only':     (use_trim and self._trim_copy),
         }
