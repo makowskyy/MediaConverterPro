@@ -32,9 +32,10 @@ def get_metadata(input_file: str, ffprobe_path: str = FFPROBE_PATH) -> dict | No
     video = next((s for s in streams if s.get('codec_type') == 'video'), None)
     audio = next((s for s in streams if s.get('codec_type') == 'audio'), None)
 
+    ext = os.path.splitext(input_file)[1].lstrip('.').upper()
     result = {
         'filename': os.path.basename(input_file),
-        'format':   fmt.get('format_long_name', fmt.get('format_name', 'Unknown')),
+        'format':   ext if ext else fmt.get('format_long_name', fmt.get('format_name', 'Unknown')),
         'duration': float(fmt.get('duration', 0)),
         'size':     int(fmt.get('size', 0)),
         'bitrate':  int(fmt.get('bit_rate', 0)),

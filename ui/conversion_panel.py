@@ -16,6 +16,9 @@ from core.ffmpeg_wrapper import FFmpegWrapper
 from core.ffmpeg_worker import FFmpegWorker
 from ui.editor_dialog import TrimDialog
 from config.settings import DEFAULT_OUTPUT_DIR, FFMPEG_PATH, FFPROBE_PATH
+from core.history_manager import HistoryManager
+
+_history = HistoryManager()
 
 VIDEO_EXTS = {'.mp4', '.mkv', '.avi', '.mov', '.webm', '.flv', '.ts',
               '.m4v', '.wmv', '.mpeg', '.mpg'}
@@ -47,6 +50,8 @@ class _FileLoaderWorker(QThread):
 # ── Główny panel konwersji ───────────────────────────────────────────────────
 
 class ConversionPanel(QWidget):
+    file_loaded = Signal(dict)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._input_file:   str | None            = None
@@ -282,6 +287,12 @@ class ConversionPanel(QWidget):
         path_row.addWidget(self._edit_outpath, stretch=1)
         path_row.addWidget(btn_browse)
         lay.addLayout(path_row)
+
+        lay.addWidget(self._flabel('Nazwa pliku wyjściowego'))
+        self._edit_filename = QLineEdit()
+        self._edit_filename.setPlaceholderText('Nazwa zostanie ustawiona po wybraniu pliku')
+        lay.addWidget(self._edit_filename)
+
         return w
 
     # ── 4. Pasek postępu + akcji ────────────────────────────────────────────
@@ -368,6 +379,8 @@ class ConversionPanel(QWidget):
             self._file_loader.wait(500)
 
         self._input_file = path
+        stem = os.path.splitext(os.path.basename(path))[0]
+        self._edit_filename.setText(f'{stem}_converted')
         self._meta_name.setText(os.path.basename(path))
         self._thumb_label.clear()
         self._thumb_label.setText('Ładowanie…')
@@ -385,6 +398,7 @@ class ConversionPanel(QWidget):
         self._refresh_output_ext()
 
     def _update_file_info(self, meta: dict):
+        self.file_loaded.emit(meta)
         self._duration = float(meta.get('duration') or 0.0)
         self._trim_start = ''
         self._trim_end   = ''
@@ -532,6 +546,7 @@ class ConversionPanel(QWidget):
 
     def _on_finished(self, success: bool):
         self._reset_conversion_ui()
+        _history.add(self._input_file, self._last_output, success)
         if success:
             self._set_status('Zakończono pomyślnie', 'statusLabel')
             QMessageBox.information(
@@ -583,9 +598,9 @@ class ConversionPanel(QWidget):
     def get_output_file(self) -> str | None:
         if not self._input_file:
             return None
-        stem = os.path.splitext(os.path.basename(self._input_file))[0]
-        return os.path.join(
-            self._edit_outpath.text(), f'{stem}_converted.{self._output_ext}')
+        name = self._edit_filename.text().strip() or \
+               os.path.splitext(os.path.basename(self._input_file))[0] + '_converted'
+        return os.path.join(self._edit_outpath.text(), f'{name}.{self._output_ext}')
 
     def get_settings(self) -> dict:
         is_video = (self._combo_type.currentText() == 'Wideo')

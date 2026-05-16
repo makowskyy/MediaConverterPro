@@ -38,15 +38,15 @@ class FFmpegWrapper:
 
             if settings.get('keep_audio'):
                 cmd += ['-c:a', 'copy']
-            elif settings.get('audio_codec'):
-                cmd += ['-c:a', settings['audio_codec']]
-
-            if settings.get('audio_bitrate') and settings['audio_bitrate'] != 'auto':
-                cmd += ['-b:a', f"{settings['audio_bitrate']}k"]
-
-            if settings.get('volume', 100) != 100:
-                vol = settings['volume'] / 100.0
-                cmd += ['-filter:a', f'volume={vol}']
+                # -b:a i -filter:a są niezgodne z -c:a copy — pomijamy
+            else:
+                if settings.get('audio_codec'):
+                    cmd += ['-c:a', settings['audio_codec']]
+                if settings.get('audio_bitrate') and settings['audio_bitrate'] != 'auto':
+                    cmd += ['-b:a', f"{settings['audio_bitrate']}k"]
+                if settings.get('volume', 100) != 100:
+                    vol = settings['volume'] / 100.0
+                    cmd += ['-filter:a', f'volume={vol}']
 
             if settings.get('trim_start'):
                 cmd += ['-ss', settings['trim_start']]

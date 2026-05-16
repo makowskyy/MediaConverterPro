@@ -11,8 +11,7 @@ ICON_SIZE  = QSize(18, 18)
 
 NAV_ITEMS = [
     ('Konwersja',          'conversion', 'conversion'),
-    ('Wideo',              'video',      'video'),
-    ('Audio',              'audio',      'audio'),
+    ('Dane pliku',         'video',      'video'),
     ('Ustawienia',         'settings',   'settings'),
     ('Historia konwersji', 'history',    'history'),
     ('O aplikacji',        'about',      'about'),

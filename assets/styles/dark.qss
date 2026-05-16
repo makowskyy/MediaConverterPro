@@ -133,6 +133,12 @@ QLabel#fileMetaLabel {
     background-color: transparent;
 }
 
+QLabel#fileInfoValue {
+    color: #e2e2f0;
+    font-size: 13px;
+    background-color: transparent;
+}
+
 QLabel#thumbnailLabel {
     background-color: #252540;
     border-radius: 6px;
@@ -166,11 +172,8 @@ QComboBox::drop-down {
 
 QComboBox::down-arrow {
     width: 10px;
-    height: 10px;
-    image: none;
-    border-left: 5px solid transparent;
-    border-right: 5px solid transparent;
-    border-top: 6px solid #9ca3af;
+    height: 6px;
+    image: url(assets/icons/chevron_down.svg);
 }
 
 QComboBox QAbstractItemView {

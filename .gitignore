@@ -20,6 +20,10 @@ build/
 dist/
 *.spec
 
+# Binaria FFmpeg (za duże dla GitHuba — dołączane przez PyInstaller)
+ffmpeg.exe
+ffprobe.exe
+
 # Historia i dane użytkownika
 history.json
 

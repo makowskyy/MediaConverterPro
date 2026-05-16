@@ -4,7 +4,6 @@ from PySide6.QtWidgets import QMainWindow, QWidget, QHBoxLayout, QStackedWidget
 from ui.sidebar import Sidebar
 from ui.conversion_panel import ConversionPanel
 from ui.video_panel import VideoPanel
-from ui.audio_panel import AudioPanel
 from ui.settings_panel import SettingsPanel
 from ui.history_panel import HistoryPanel
 from ui.about_panel import AboutPanel
@@ -17,7 +16,7 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f'{APP_NAME} {APP_VERSION}')
-        self.setMinimumSize(1000, 680)
+        self.setMinimumSize(1000, 780)
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -35,7 +34,6 @@ class MainWindow(QMainWindow):
         self._pages: dict[str, QWidget] = {
             'conversion': ConversionPanel(),
             'video':      VideoPanel(),
-            'audio':      AudioPanel(),
             'settings':   SettingsPanel(),
             'history':    HistoryPanel(),
             'about':      AboutPanel(),
@@ -46,12 +44,18 @@ class MainWindow(QMainWindow):
         self._sidebar.page_changed.connect(self._switch_page)
         self._switch_page('conversion')
 
+        self._pages['conversion'].file_loaded.connect(
+            self._pages['video'].update_metadata)
+
         self._load_stylesheet()
 
     def _load_stylesheet(self):
         try:
+            icons_dir = os.path.join(os.path.dirname(__file__), '..', 'assets', 'icons')
+            icons_dir = os.path.normpath(icons_dir).replace('\\', '/')
             with open(DARK_QSS, 'r', encoding='utf-8') as f:
-                self.setStyleSheet(f.read())
+                qss = f.read().replace('assets/icons/', icons_dir + '/')
+            self.setStyleSheet(qss)
         except OSError:
             pass
 
